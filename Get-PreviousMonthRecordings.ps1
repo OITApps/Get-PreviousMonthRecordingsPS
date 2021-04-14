@@ -85,11 +85,11 @@ function Format-NSTime($data){
     $data = Get-Date $data -UFormat “%Y-%m-%d %H:%M:%S”
     return $data
 }
-$startMonth = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat “%Y-%m"
+$startMonth = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat "%Y-%m"
 $startDate = (Get-Date -Day 1).Date.AddMonths(-1)
 $startDate = Get-Date $startDate -UFormat “%Y-%m-%d %H:%M:%S”
 $endDate = (Get-Date -Day 1 -Hour 0 -Minute 0 -Second 0).AddSeconds(-1)
-$endDate = Get-Date $endDate-UFormat “%Y-%m-%d %H:%M:%S”
+$endDate = Get-Date $endDate -UFormat “%Y-%m-%d %H:%M:%S”
 
 $payload = @{
     object     = 'cdr2'
