@@ -147,5 +147,5 @@ foreach ($cdr in $cdrs) {
     $call.url | ForEach-Object { Invoke-WebRequest -Uri $_ -OutFile $newPath }
 }
 
-$manifestName = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat “%Y%m"
+$manifestName = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat "%Y%m"
 $filelist | Export-Csv -NoTypeInformation "$($folderName)\$($manifestName) Call History.csv"
