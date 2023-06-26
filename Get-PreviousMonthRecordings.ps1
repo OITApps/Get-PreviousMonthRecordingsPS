@@ -12,20 +12,28 @@ $clientSecret = ""
 $userName = ""
 $password = ""
 
+$debug = 0 #set to 1 to output to ps shell, set to 0 to disable shell output
 
 #region Helper Functions
 
+# logic for enabling/disabling debug in the script. 
+if ($debug -eq 1) {
+    $output = "Write-Output"
+} else {
+    $output = { param($args) }
+}
+
 ## Trap any errors
-trap [Net.WebException] { continue; }
+# trap [Net.WebException] { continue; }
 #Add Web Assembly for URL encoding
 Add-Type -AssemblyName System.Web
 # Authenticate against switch
-Function Get-Token() {
+Function Get-Token {
     ## Helper function to get an access token. Required to perform calls against the API
     ## Scopes: Any
     $tokenURL = "https://" + $fqdn + "/ns-api/oauth2/token/?grant_type=password&client_id=" + $clientID + "&client_secret=" + $clientSecret + "&username=" + $userName + "&password=" + $password
 
-    $response = Invoke-RestMethod $tokenURL
+    $response = Invoke-RestMethod $tokenURL 
     $currentDate = Get-Date
 
     $Global:apiToken = New-Object -TypeName psobject
@@ -79,17 +87,40 @@ Function Convert-EpochTime($epoch){
 
 #endregion
 
+function Create-FileObject {
+    param(
+        [string]$Date,
+        [string]$Time,
+        [string]$From,
+        [string]$To,
+        [string]$Filename,
+        [string]$Duration
+    )
+
+    $file = [PSCustomObject]@{
+        Date = $Date
+        Time = $Time
+        From = $From
+        To = $To
+        Duration = $Duration
+        Filename = $Filename
+    }
+    $filelist += $file  # Add the created file object to the $filelist array
+    return $file
+
+}
+
 #Set start and end date to last calendar month
 #Format dates to 2019-01-01 00:00:00
 function Format-NSTime($data){
-    $data = Get-Date $data -UFormat “%Y-%m-%d %H:%M:%S”
+    $data = Get-Date -UFormat "%Y-%m-%d %H:%M:%S"
     return $data
 }
 $startMonth = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat "%Y-%m"
 $startDate = (Get-Date -Day 1).Date.AddMonths(-1)
-$startDate = Get-Date $startDate -UFormat “%Y-%m-%d %H:%M:%S”
+$startDate = Get-Date $startDate -UFormat "%Y-%m-%d %H:%M:%S"
 $endDate = (Get-Date -Day 1 -Hour 0 -Minute 0 -Second 0).AddSeconds(-1)
-$endDate = Get-Date $endDate -UFormat “%Y-%m-%d %H:%M:%S”
+$endDate = Get-Date $endDate -UFormat "%Y-%m-%d %H:%M:%S"
 
 $payload = @{
     object     = 'cdr2'
@@ -97,55 +128,100 @@ $payload = @{
     start_date = $startDate
     end_date   = $endDate
     domain     = $domain
-    raw        = "yes"
-    limit      = "9999999"
-    format     = "json"
+    raw        = 'no'
+    limit      = '9999999'
+    format     = 'json'
 }  
 Try {
     $cdrs = Invoke-NSRequest $payload 
-    $cdrs = $cdrs.CdrR |  Select-Object -Property orig_callid, orig_to_user, term_callid, orig_from_user, time_start
+    $cdrs = $cdrs.CdrR | Select-Object -Property orig_callid, orig_to_user, term_callid, orig_from_user, time_start, duration
+    # Invoke-Output $cdrs
+    & $output $cdrs
+
+    # Create folder for call recordings
+    $folderName = $psscriptroot + "\" + $startMonth
+    if (!(Test-Path $folderName)) {
+        New-Item -Path $folderName -ItemType Directory
+    }
+    $filelist = @()
+
+    foreach ($cdr in $cdrs) {
+        $payload = @{
+            object      = 'recording'
+            action      = 'read'
+            orig_callid = $cdr.orig_callid
+            term_callid = $cdr.term_callid
+            domain      = $domain
+            limit       = '999999'
+        }
+        $retryCount = 1
+        $retryLimit = 3
+        $fileDownloaded = $false
+        while (!$fileDownloaded -and $retryCount -lt $retryLimit) {
+        try {
+        $call = Invoke-NSRequest $payload 
+
+        $fileName =  $cdr.term_callid + ".wav"
+        $newPath = $folderName + "\" + $fileName
+
+        if ($call.url) { 
+            # Download the file if a valid URL exists
+            $call.url | ForEach-Object { Invoke-WebRequest -Uri $_ -OutFile $newPath }
+
+            $file = Create-FileObject -Date (Convert-EpochDate $cdr.time_start) -Time (Convert-EpochTime $cdr.time_start) `
+                                     -From $cdr.orig_from_user -To $cdr.orig_to_user -Duration $cdr.duration -Filename $fileName
+            & $output $file
+            & $output "File downloaded: $newPath"
+            $fileDownloaded = $true
+
+            # Add the file object to the $filelist array
+            $filelist += $file
+        } else {
+            $file = Create-FileObject -Date (Convert-EpochDate $cdr.time_start) -Time (Convert-EpochTime $cdr.time_start) `
+                                     -From $cdr.orig_from_user -To $cdr.orig_to_user -Duration $cdr.duration -Filename $fileName
+
+            & $output $file
+            & $output "No Recording Found"
+            break  # Exit the inner loop if "No Recording Found" or file downloaded
+        }
+    }
+            catch {
+                $errorMessage = $_.Exception.Message
+                & $output "Error: $errorMessage"
+
+                if ($retryCount -lt $retryLimit) {
+                    $payload = @{
+                        object      = 'recording'
+                        action      = 'read'
+                        orig_callid = $cdr.term_callid
+                        term_callid = $cdr.orig_callid
+                        domain      = $domain
+                        limit       = '999999'
+                    }
+                    $fileName =  $cdr.orig_callid + ".wav"
+                    $newPath = $folderName + "\" + $fileName
+                    $file = Create-FileObject -Date (Convert-EpochDate $cdr.time_start) -Time (Convert-EpochTime $cdr.time_start) `
+                                            -From $cdr.orig_from_user -To $cdr.orig_to_user -Duration $cdr.duration -Filename $fileName
+
+                    & $output $file
+                    & $output "Retrying..."
+                } else {
+                    $file = Create-FileObject -Date (Convert-EpochDate $cdr.time_start) -Time (Convert-EpochTime $cdr.time_start) `
+                                            -From $cdr.orig_from_user -To $cdr.orig_to_user -Duration $cdr.duration -Filename $fileName
+
+                    & $output $file
+                    & $output "Retry limit reached. Skipping file."
+                    $fileDownloaded = $true  # Set fileDownloaded to true to skip adding to $filelist
+                    $file = $null  # Reset $file variable to null
+                }
+            }
+        }
+    }
+
+    $manifestName = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat "%Y%m"
+    $filelist | ConvertTo-Csv -NoTypeInformation | Set-Content "$($folderName)\$($manifestName) Call History.csv"
 }
 Catch {
-    $res = "No data returned"
-    return $res
+    $errorMessage = $_.Exception.Message
+    & $output "Error: $errorMessage"
 }
-
-# Create folder for call recordings
-$folderName = $psscriptroot + "\" + $startMonth
-if (!(test-path $folderName)) {
-    New-Item -Path $folderName -ItemType Directory
-}
-$filelist = @()
-
-foreach ($cdr in $cdrs) {
-    $payload = @{
-        object      = 'recording'
-        action      = 'read'
-        orig_callid = $cdr.orig_callid
-        term_callid = $cdr.term_callid
-        domain      = $domain
-    }
-    $call = Invoke-NSRequest $payload
-
-    $fileName =  $cdr.term_callid + ".wav"
-
-
-
-    
-    $newPath = $folderName + "\" + $fileName
-    if (!$call.url) { 
-        continue
-    }
-    $file = [PSCustomObject]@{
-        Date = $(Convert-EpochDate($cdr.time_start))
-        Time = $(Convert-EpochTime($cdr.time_start))
-        From = $cdr.orig_from_user
-        To = $cdr.orig_to_user
-        Filename = $fileName
-    }
-    $filelist += $file
-    $call.url | ForEach-Object { Invoke-WebRequest -Uri $_ -OutFile $newPath }
-}
-
-$manifestName = (Get-Date -Day 1).Date.AddMonths(-1) | Get-Date -UFormat "%Y%m"
-$filelist | Export-Csv -NoTypeInformation "$($folderName)\$($manifestName) Call History.csv"
